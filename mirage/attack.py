@@ -147,7 +147,7 @@ def immunize(
         targets = build_target_set(
             cfg.target_categories, cfg.use_text_targets, cfg.image_targets_dir
         )
-        encoders = attach_targets(base, targets)
+        encoders = attach_targets(base, targets, local_text_only=cfg.local_text_only)
     keys = [e.key for e in encoders]
 
     cache = SecantGradientCache(keys) if cfg.use_secant_cache else None

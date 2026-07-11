@@ -35,6 +35,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--steps", type=int, default=None)
     p.add_argument("--num-patches", type=int, default=None,
                    help="local-view patches per step (Table 5: 16). Fewer = faster.")
+    p.add_argument("--lambda-local", type=float, default=None,
+                   help="weight of the local-patch alignment (Table 5: 0.25). Lower = less "
+                        "high-res 'painting' of target content (cleaner), still triggers "
+                        "moderation via the global + ShieldGemma signal.")
+    p.add_argument("--local-text-only", action="store_true",
+                   help="use ONLY text targets for the local patches (image targets stay on "
+                        "the global view). Removes explicit high-res painting from the "
+                        "perturbation while keeping the refusal signal.")
     p.add_argument("--fast", action="store_true",
                    help="speed preset: steps=2500, num_patches=8, top_k=4 (~4x faster; "
                         "ε=16/255 still gives ~100%% immunization per Table 4)")
@@ -71,6 +79,10 @@ def build_config(args: argparse.Namespace) -> MirageConfig:
     if args.num_patches is not None:
         cfg.num_patches = args.num_patches
         cfg.top_k = min(cfg.top_k, args.num_patches)
+    if args.lambda_local is not None:
+        cfg.lambda_local = args.lambda_local
+    if args.local_text_only:
+        cfg.local_text_only = True
     if args.categories is not None:
         cfg.target_categories = args.categories
     if args.image_targets is not None:

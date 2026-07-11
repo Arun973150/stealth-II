@@ -43,12 +43,14 @@ def encoder_score(
     ``patches`` is the shared (num_patches,3,patch_size,patch_size) local-view batch (see
     ``sample_shared_patches``); each encoder resizes it to its own resolution internally.
     """
-    phi_g = enc.view_score(x).mean()  # global view (B=1)
+    phi_g = enc.view_score(x, local=False).mean()  # global view (B=1)
     # Heavy VLM moderators run global-only (patch forwards through a 4B/11B model per step
     # would be prohibitive); enc.use_local gates this.
     if patches is None or not getattr(enc, "use_local", True):
         return phi_g
-    phi_p = enc.view_score(patches)                                # (p,)
+    phi_p = enc.view_score(patches, local=True)                    # (p,) or None
+    if phi_p is None:  # no local target for this encoder (e.g. DINOv2 under local_text_only)
+        return phi_g
     k = min(cfg.top_k, phi_p.numel())
     topk_mean = torch.topk(phi_p, k).values.mean()
     return phi_g + cfg.lambda_local * topk_mean

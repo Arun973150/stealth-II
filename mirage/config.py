@@ -89,6 +89,9 @@ class MirageConfig:
     target_categories: List[str] = field(default_factory=lambda: ["sexual"])
     use_text_targets: bool = True      # use text captions as targets (safe; no explicit media)
     image_targets_dir: Optional[str] = None  # optional dir of user-supplied image targets
+    local_text_only: bool = False      # image targets drive the global view only; local
+                                        # patches align to text only -> avoids the attack
+                                        # "painting" explicit high-res target detail.
 
     # ---- Augmentations (Sec. 4.3) ----
     use_augmentations: bool = True

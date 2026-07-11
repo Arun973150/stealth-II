@@ -102,7 +102,8 @@ class Encoder:
         self._unsafe_score = unsafe_score
         self._mean = torch.tensor(mean, device=device).view(1, 3, 1, 1)
         self._std = torch.tensor(std, device=device).view(1, 3, 1, 1)
-        self._target_cache: Optional[torch.Tensor] = None
+        self._target_global: Optional[torch.Tensor] = None
+        self._target_local: Optional[torch.Tensor] = None
 
     # ---- differentiable preprocessing ----
     def _preprocess(self, x: torch.Tensor) -> torch.Tensor:
@@ -118,34 +119,56 @@ class Encoder:
         return F.normalize(feats, dim=-1)
 
     # ---- unified per-view score (differentiable) ----
-    def view_score(self, x: torch.Tensor) -> torch.Tensor:
-        """Return a per-image score (B,) in a maximize-me direction (higher = 'unsafer')."""
+    def view_score(self, x: torch.Tensor, local: bool = False) -> Optional[torch.Tensor]:
+        """Per-image score (B,) in a maximize-me direction (higher = 'unsafer').
+
+        ``local`` selects the local-view target cache (which, under local_text_only, excludes
+        image targets). Returns None for an embedding encoder that has no target for this view
+        (e.g. DINOv2 in local_text_only mode -> caller skips its local contribution).
+        """
         if self.score_kind == "moderation":
             return self._unsafe_score(self._preprocess(x))
-        # embedding: mean cosine similarity to targets
+        cache = self._target_local if local else self._target_global
+        if cache is None:
+            return None
         emb = self.embed_image(x)                       # (B, D)
-        return (emb @ self._target_cache.t()).mean(dim=1)  # (B,)
+        return (emb @ cache.t()).mean(dim=1)            # (B,)
 
     # ---- target embeddings (embedding kind only; computed once, no grad) ----
     @torch.no_grad()
-    def precompute_targets(self, targets: TargetSet) -> Optional[torch.Tensor]:
+    def precompute_targets(
+        self, targets: TargetSet, local_text_only: bool = False
+    ) -> Optional[torch.Tensor]:
         if self.score_kind == "moderation":
+            self._target_global = self._target_local = None
             return None  # moderation models need no targets
-        embs: List[torch.Tensor] = []
+
+        text_emb = None
         if self.supports_text and targets.texts:
             tokens = self._tokenizer(targets.texts).to(self.device)
-            embs.append(F.normalize(_as_tensor(self._text_encode(tokens)), dim=-1))
+            text_emb = F.normalize(_as_tensor(self._text_encode(tokens)), dim=-1)
+
+        img_embs: List[torch.Tensor] = []
         for img in targets.images:
             arr = torch.from_numpy(
                 np.asarray(img.convert("RGB"), dtype=np.float32) / 255.0
             ).permute(2, 0, 1).unsqueeze(0).to(self.device)
-            embs.append(self.embed_image(arr))
-        self._target_cache = torch.cat(embs, dim=0) if embs else None
-        return self._target_cache
+            img_embs.append(self.embed_image(arr))
+
+        # Global view: all available targets (text + image).
+        g_parts = ([text_emb] if text_emb is not None else []) + img_embs
+        self._target_global = torch.cat(g_parts, dim=0) if g_parts else None
+
+        # Local view: text-only when requested (no explicit high-res painting), else all.
+        if local_text_only:
+            self._target_local = text_emb  # None for text-less encoders (they skip local)
+        else:
+            self._target_local = self._target_global
+        return self._target_global
 
     @property
     def target_embeddings(self) -> Optional[torch.Tensor]:
-        return self._target_cache
+        return self._target_global
 
 
 # --------------------------------------------------------------------------------------
@@ -335,14 +358,16 @@ def build_ensemble(specs: List[ModelSpec], device: torch.device) -> List[Encoder
     return encoders
 
 
-def attach_targets(encoders: List[Encoder], targets: TargetSet) -> List[Encoder]:
+def attach_targets(
+    encoders: List[Encoder], targets: TargetSet, local_text_only: bool = False
+) -> List[Encoder]:
     """Precompute target embeddings; keep moderation models and any encoder with a target."""
     usable: List[Encoder] = []
     for enc in encoders:
         if enc.score_kind == "moderation":
             usable.append(enc)
             continue
-        if enc.precompute_targets(targets) is None:
+        if enc.precompute_targets(targets, local_text_only=local_text_only) is None:
             warnings.warn(f"{enc.key} has no usable target (no text encoder + no image "
                           "targets); dropping from the objective.")
             continue
