@@ -129,6 +129,14 @@ def immunize(
     seed_everything(cfg.seed)
     device = resolve_device(cfg.device)
 
+    if device.type == "cuda":
+        # Standard Ampere+ (A40/A100) speedups: TF32 matmul + cuDNN autotuning. Input sizes
+        # are fixed across steps (patches always patch_size, global fixed per encoder), so
+        # benchmark autotuning pays off. Big matmul/conv throughput win on ViT surrogates.
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+
     if image.dim() == 3:
         image = image.unsqueeze(0)
     x0 = image.to(device).clamp(0, 1)
