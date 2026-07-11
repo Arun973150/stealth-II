@@ -1,9 +1,12 @@
 """Configuration for MIRAGE.
 
-Every hyperparameter mentioned in the paper is surfaced here. Two ready-made
-configs are provided:
+Every hyperparameter here is set to match **Appendix B, Table 5** of the paper verbatim
+("Hyper-parameters for MIRAGE used in the main experiments"), which is the authoritative
+source -- it overrides the looser prose description in Sec. 4.3 where the two disagree.
 
-* ``MirageConfig()``            -- the paper defaults (needs a GPU to be practical)
+Two ready-made configs are provided:
+
+* ``MirageConfig()``            -- the paper's exact main-experiment config (needs a GPU)
 * ``DEMO_CONFIG``               -- a tiny, CPU-runnable config to verify correctness
 """
 
@@ -17,69 +20,73 @@ from typing import List, Literal, Optional
 class ModelSpec:
     """Specification of a single surrogate encoder in the ensemble."""
 
-    kind: Literal["openclip", "dino", "moderation"]
+    kind: Literal[
+        "openclip", "dino", "hf_dinov2", "hf_siglip", "moderation",
+        "shieldgemma2", "llamaguard_vision",
+    ]
     name: str
-    pretrained: Optional[str] = None  # open_clip pretrained tag, or timm has weights baked in
+    pretrained: Optional[str] = None  # open_clip pretrained tag; unused by HF-loaded kinds
 
     def key(self) -> str:
         return f"{self.kind}:{self.name}:{self.pretrained or ''}"
 
 
-# --- The paper's ensemble: 8 CLIP-style transformers (diverse training data) + DINOv2 ---
-# Chosen to span OpenAI / LAION / DataComp / MetaCLIP / EVA training distributions so the
-# perturbation transfers across many representation spaces (Sec. 4.3, Fig. 7).
+# --- Table 5's exact surrogate ensemble (8 models) ---
+# "hf dinov2:facebook/dinov2-base; hf siglip:google/siglip-base-patch16-224;
+#  open_clip:ViT-B-32/laion2b_s34b_b79k; open_clip:ViT-B-16/laion2b_s34b_b88k;
+#  open_clip:ViT-L-14/datacomp_xl_s13b_b90k; open_clip:ViT-L-14/dfn2b_s39b;
+#  open_clip:ViT-H-14/dfn5b; shieldgemma:google/shieldgemma-2-4b-it: sexual"
 DEFAULT_ENSEMBLE: List[ModelSpec] = [
-    ModelSpec("openclip", "ViT-B-32", "openai"),
+    ModelSpec("hf_dinov2", "facebook/dinov2-base"),
+    ModelSpec("hf_siglip", "google/siglip-base-patch16-224"),
+    ModelSpec("openclip", "ViT-B-32", "laion2b_s34b_b79k"),
     ModelSpec("openclip", "ViT-B-16", "laion2b_s34b_b88k"),
-    ModelSpec("openclip", "ViT-L-14", "laion2b_s32b_b82k"),
-    ModelSpec("openclip", "ViT-B-32", "datacomp_xl_s13b_b90k"),
-    ModelSpec("openclip", "ViT-B-16", "datacomp_l_s1b_b8k"),
-    ModelSpec("openclip", "ViT-B-32-quickgelu", "metaclip_400m"),
-    ModelSpec("openclip", "EVA02-B-16", "merged2b_s8b_b131k"),
     ModelSpec("openclip", "ViT-L-14", "datacomp_xl_s13b_b90k"),
-    # Self-supervised encoder for more robust perturbations (image targets only).
-    ModelSpec("dino", "vit_small_patch14_dinov2.lvd142m"),
-    # Open-source image safety classifier (stands in for ShieldGemma); differentiable
-    # unsafe-probability that we maximize directly (Sec. 4.3).
-    ModelSpec("moderation", "Falconsai/nsfw_image_detection"),
+    ModelSpec("openclip", "ViT-L-14", "dfn2b_s39b"),
+    ModelSpec("openclip", "ViT-H-14", "dfn5b"),
+    ModelSpec("shieldgemma2", "google/shieldgemma-2-4b-it"),
 ]
 
-# A minimal ensemble that downloads fast and runs on CPU for smoke-testing.
+# A minimal ensemble that downloads fast and runs on CPU for smoke-testing (not from the
+# paper; purely for verifying the plumbing without a GPU or gated models).
 DEMO_ENSEMBLE: List[ModelSpec] = [
     ModelSpec("openclip", "ViT-B-32", "openai"),
     ModelSpec("openclip", "ViT-B-32", "laion2b_s34b_b79k"),
 ]
 
-# Opt-in ensemble that adds the large moderation VLMs from the paper (Sec. 4.3). These are
-# LICENSE-GATED on Hugging Face (accept Google/Meta terms + authenticate) and heavy (4B/11B),
-# so they are GPU-only and NOT part of the default ensemble. ShieldGemma-2 is confirmed in
-# the paper (ref [68]); Llama Guard 3 Vision is a plausible candidate for the unnamed ref [15].
+# Opt-in extra: Llama Guard 3 Vision is a REAL citation in the paper (ref [15], J. Chi et al.,
+# arXiv:2411.10414) named alongside ShieldGemma [68] in the Sec. 4.3 prose as an available
+# open moderation model -- but Table 5's actual main-experiment ensemble does NOT include it
+# (only ShieldGemma-2 is listed there). This is offered as an additional opt-in surrogate on
+# top of the exact Table-5 ensemble, not a paper-verified part of the headline results.
 VLM_MODERATOR_ENSEMBLE: List[ModelSpec] = DEFAULT_ENSEMBLE + [
-    ModelSpec("shieldgemma2", "google/shieldgemma-2-4b-it"),
     ModelSpec("llamaguard_vision", "meta-llama/Llama-Guard-3-11B-Vision"),
 ]
 
 
 @dataclass
 class MirageConfig:
-    # ---- Perturbation / PGD (Sec. 4.3) ----
-    budget: float = 16 / 255           # L-inf bound B on delta (paper default 16/255)
+    # ---- Perturbation / PGD (Table 5) ----
+    budget: float = 16 / 255           # ||delta||_inf <= B (main result; paper also sweeps 2/4/8)
     steps: int = 5000                  # PGD iterations
-    step_size: Optional[float] = None  # iterated FGSM step; defaults to 2.5*budget/steps-ish
+    step_size: float = 1.0 / 255.0     # peak step size (Table 5: "Step size: 1.0", in /255 units)
+    step_schedule: Literal["cosine", "constant"] = "cosine"  # Table 5: "Schedule: Cosine"
     random_init: bool = True           # start delta from a random point in the L-inf ball
+    eot_samples: int = 1               # Table 5: "EOT samples: 1" (one augmented view per step)
 
-    # ---- Ensemble ----
+    # ---- Ensemble (Table 5's exact 8-model list) ----
     ensemble: List[ModelSpec] = field(default_factory=lambda: list(DEFAULT_ENSEMBLE))
 
-    # ---- Global-Local views (Eq. 2) ----
+    # ---- Global-Local views (Eq. 2, Table 5) ----
     use_global_local: bool = True
-    num_patches: int = 16              # p: random full-res patches for the local view
-    top_k: int = 4                     # k: keep k most-aligned patches
-    lambda_local: float = 1.0          # lambda: local vs global balance
+    patch_size: int = 256              # Table 5: "Patch size: 256" -- ONE fixed crop size,
+                                        # shared across the whole ensemble (not per-encoder).
+    num_patches: int = 16               # Table 5: "Number of local patches: 16"
+    top_k: int = 8                      # Table 5: "Local pooling k: 8"
+    lambda_local: float = 0.25          # Table 5: "Local view weight: 0.25"
 
-    # ---- Target concept set T (Sec. 4.2) ----
-    # "sexual" is the most strongly moderated target (Fig. 9); "violence" also supported.
-    target_categories: List[str] = field(default_factory=lambda: ["sexual", "violence"])
+    # ---- Target concept set T (Table 5: "Objective category: Sexual") ----
+    target_categories: List[str] = field(default_factory=lambda: ["sexual"])
     use_text_targets: bool = True      # use text captions as targets (safe; no explicit media)
     image_targets_dir: Optional[str] = None  # optional dir of user-supplied image targets
 
@@ -87,10 +94,11 @@ class MirageConfig:
     use_augmentations: bool = True
     aug_prob: float = 0.9              # prob. of applying an augmentation on a given step
 
-    # ---- Model dropout + secant gradient caching (Sec. 4.3) ----
+    # ---- Model dropout + secant gradient caching (Table 5) ----
     model_dropout: bool = True
-    active_models_per_step: int = 4    # how many models get a real gradient each step
-    use_secant_cache: bool = True      # approximate dropped-model gradients via secant rule
+    surrogate_drop_prob: float = 0.3    # Table 5: "Surrogate drop probability: 0.3"
+    min_active_surrogates: int = 3      # Table 5: "Minimum selected surrogates: 3"
+    use_secant_cache: bool = True       # approximate dropped-model gradients via secant rule
 
     # ---- Validation / checkpointing (Sec. 4.3) ----
     checkpoint_every: int = 250
@@ -103,21 +111,26 @@ class MirageConfig:
     log_every: int = 50
     dtype: Literal["float32", "float16"] = "float32"
 
-    def resolved_step_size(self) -> float:
-        if self.step_size is not None:
+    def step_size_at(self, t: int) -> float:
+        """Cosine-scheduled step size at PGD iteration t (0-indexed), per Table 5."""
+        if self.step_schedule == "constant":
             return self.step_size
-        # A standard PGD heuristic: enough total travel to cross the ball a few times.
-        return max(1.0 / 255.0, 2.5 * self.budget / max(1, min(self.steps, 200)))
+        import math
+
+        return self.step_size * 0.5 * (1.0 + math.cos(math.pi * t / max(1, self.steps)))
 
 
-# CPU-friendly config: tiny ensemble, few steps, small views. For correctness checks only.
+# CPU-friendly config: tiny ensemble, few steps, small views. For correctness checks only
+# (not a paper configuration -- use MirageConfig() for the real thing on a GPU).
 DEMO_CONFIG = MirageConfig(
     budget=16 / 255,
     steps=40,
     ensemble=list(DEMO_ENSEMBLE),
+    patch_size=64,
     num_patches=4,
     top_k=2,
-    active_models_per_step=2,
+    surrogate_drop_prob=0.0,
+    min_active_surrogates=2,
     model_dropout=False,
     use_secant_cache=False,
     checkpoint_every=20,

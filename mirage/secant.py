@@ -53,8 +53,17 @@ class SecantGradientCache:
         return g_prev1 + (g_prev1 - g_prev2) * coeff
 
 
-def sample_active(keys: List[str], k: int) -> List[str]:
-    """Choose k models to receive a real gradient this step (model dropout)."""
-    if k >= len(keys):
-        return list(keys)
-    return random.sample(keys, k)
+def sample_active(keys: List[str], drop_prob: float, min_active: int) -> List[str]:
+    """Choose which models receive a real gradient this step (model dropout, Table 5).
+
+    Each model is independently dropped with probability ``drop_prob`` ("Surrogate drop
+    probability: 0.3"); if fewer than ``min_active`` survive, models are randomly promoted
+    back to active until the floor is met ("Minimum selected surrogates: 3").
+    """
+    active = [k for k in keys if random.random() >= drop_prob]
+    if len(active) < min(min_active, len(keys)):
+        dropped = [k for k in keys if k not in active]
+        random.shuffle(dropped)
+        need = min(min_active, len(keys)) - len(active)
+        active += dropped[:need]
+    return active

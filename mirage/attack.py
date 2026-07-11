@@ -21,7 +21,7 @@ import torch
 from .augment import apply_random_augmentation
 from .config import MirageConfig
 from .ensemble import Encoder, attach_targets, build_ensemble
-from .objective import encoder_score, total_objective
+from .objective import encoder_score, sample_shared_patches, total_objective
 from .secant import SecantGradientCache, sample_active
 from .targets import build_target_set
 from .utils import (
@@ -62,15 +62,21 @@ def _ensemble_gradient(
     delta = delta.detach().requires_grad_(True)
     x_adv = x0 + delta
     x_in = apply_random_augmentation(x_adv, cfg.aug_prob) if cfg.use_augmentations else x_adv
+    # One shared local-view patch set per step (Table 5: fixed 256x256 crop, same regions
+    # scored by every surrogate this step -- not independently resampled per encoder).
+    patches = sample_shared_patches(x_in, cfg)
 
-    active = sample_active(keys, cfg.active_models_per_step) if cfg.model_dropout else list(keys)
+    if cfg.model_dropout:
+        active = sample_active(keys, cfg.surrogate_drop_prob, cfg.min_active_surrogates)
+    else:
+        active = list(keys)
     active_set = set(active)
 
     total_grad = torch.zeros_like(delta)
     obj_val = 0.0
     for enc in encoders:
         if enc.key in active_set:
-            score = encoder_score(enc, x_in, cfg)
+            score = encoder_score(enc, x_in, cfg, patches)
             g = torch.autograd.grad(score, delta, retain_graph=True)[0]
             total_grad = total_grad + g
             obj_val += float(score.detach())
@@ -128,7 +134,6 @@ def immunize(
         delta = torch.zeros_like(x0)
     delta = _project(x0, delta, cfg.budget)
 
-    step_size = cfg.resolved_step_size()
     history: List[float] = []
     # Public-API checkpoint selection state (Sec. 4.3); only used if enabled + key present.
     api_enabled = cfg.select_by_public_api and bool(cfg.openai_moderation_key)
@@ -136,6 +141,7 @@ def immunize(
 
     for t in range(cfg.steps):
         grad, _ = _ensemble_gradient(encoders, keys, x0, delta, cfg, cache)
+        step_size = cfg.step_size_at(t)  # cosine-scheduled per Table 5
         delta = delta + step_size * grad.sign()
         delta = _project(x0, delta, cfg.budget)
 

@@ -39,8 +39,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-global-local", action="store_true")
     p.add_argument("--no-augment", action="store_true")
     p.add_argument("--vlm-moderators", action="store_true",
-                   help="add ShieldGemma-2 + Llama Guard 3 Vision to the ensemble "
-                        "(GPU-only, license-gated on HF; opt-in)")
+                   help="add Llama Guard 3 Vision on top of the default ensemble "
+                        "(ShieldGemma-2 is already default per Table 5); "
+                        "GPU-only, license-gated on HF; opt-in")
     p.add_argument("--openai-validate", default=None, metavar="API_KEY",
                    help="enable public-moderation-API checkpoint selection (Sec 4.3)")
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])

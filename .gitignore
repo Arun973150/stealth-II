@@ -4,6 +4,9 @@ __pycache__/
 venv/
 *.egg-info/
 
+# Local Claude Code state, not project source
+.claude/
+
 # Model / HF caches if ever redirected into the repo
 .cache/
 *.safetensors

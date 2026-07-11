@@ -5,16 +5,22 @@ differentiable* per-view score, so PGD can backpropagate gradients from the obje
 the way to the input pixels. open_clip's built-in ``preprocess`` transforms operate on PIL
 images and are NOT differentiable, so we reconstruct preprocessing ourselves.
 
-Three surrogate kinds, all reduced to a single ``view_score(x) -> (B,)`` signal:
+Surrogate kinds, all reduced to a single ``view_score(x) -> (B,)`` signal. Table 5's exact
+main-experiment ensemble uses "hf_dinov2", "hf_siglip", "openclip" (x5), and "shieldgemma2":
 
-  * "openclip"   -- CLIP / OpenCLIP / MetaCLIP / EVA / DataComp ViTs. score = mean cosine
-                    similarity of the image embedding to the (text/image) target embeddings.
-  * "dino"       -- self-supervised DINOv2 (timm). Image targets only (no text encoder).
-                    score = mean cosine similarity to image-target embeddings.
-  * "moderation" -- an open-source image safety classifier (e.g. an NSFW ViT, standing in
-                    for ShieldGemma). score = the differentiable "unsafe" probability, which
-                    we maximize directly (Sec. 4.3: "open-source moderation models which
-                    return a scalar in [0,1] ... we maximize this score").
+  * "openclip"         -- OpenCLIP ViTs (LAION / DataComp / DFN checkpoints per Table 5).
+                          score = mean cosine similarity of the image embedding to targets.
+  * "hf_dinov2"        -- self-supervised DINOv2 (`facebook/dinov2-base` via transformers).
+                          Image targets only (no text encoder).
+  * "hf_siglip"        -- SigLIP (`google/siglip-base-patch16-224` via transformers). Has
+                          both a text and image tower, like the OpenCLIP entries.
+  * "dino"             -- legacy timm-based DINOv2 loader; kept for flexibility, not used
+                          by the default Table-5 ensemble.
+  * "moderation"        -- a generic open-source image safety classifier (e.g. an NSFW ViT).
+                          score = the differentiable "unsafe" probability, maximized directly.
+  * "shieldgemma2"      -- ShieldGemma-2 (paper ref [68]); see moderation_vlms.py.
+  * "llamaguard_vision" -- Llama Guard 3 Vision (paper ref [15]); opt-in extra, not part of
+                          Table 5's main-experiment ensemble. See moderation_vlms.py.
 
 Unifying all three as ``view_score`` lets the objective (Eq. 2) treat similarity and
 moderation-probability identically.
@@ -139,6 +145,8 @@ def _openclip_encoder(spec: ModelSpec, device: torch.device) -> Encoder:
 
 
 def _dino_encoder(spec: ModelSpec, device: torch.device) -> Encoder:
+    """Legacy timm-based DINOv2 loader (kept for flexibility; Table 5 uses the HF loader
+    below, ``hf_dinov2``, for the actual paper ensemble)."""
     import timm
 
     model = timm.create_model(spec.name, pretrained=True, num_classes=0)
@@ -149,6 +157,61 @@ def _dino_encoder(spec: ModelSpec, device: torch.device) -> Encoder:
         mean=cfg.get("mean", _IMAGENET_MEAN), std=cfg.get("std", _IMAGENET_STD),
         device=device, score_kind="embedding", supports_text=False,
         image_encode=lambda px: model(px),
+    )
+
+
+def _hf_dinov2_encoder(spec: ModelSpec, device: torch.device) -> Encoder:
+    """Table 5's DINOv2 surrogate: ``facebook/dinov2-base`` via HuggingFace transformers.
+
+    No text encoder (self-supervised, image-only), so it only ever aligns to image targets
+    -- consistent with the paper's statement that DINOv2 uses image embeddings only.
+    """
+    from transformers import AutoImageProcessor, AutoModel
+
+    model = AutoModel.from_pretrained(spec.name)
+    proc = AutoImageProcessor.from_pretrained(spec.name)
+    size = getattr(proc, "size", {}) or {}
+    resolution = size.get("height") or size.get("shortest_edge") or 224
+    mean = getattr(proc, "image_mean", _IMAGENET_MEAN)
+    std = getattr(proc, "image_std", _IMAGENET_STD)
+
+    def image_encode(px: torch.Tensor) -> torch.Tensor:
+        out = model(pixel_values=px)
+        return out.last_hidden_state[:, 0, :]  # CLS token
+
+    return Encoder(
+        key=spec.key(), model=model, resolution=resolution, mean=mean, std=std,
+        device=device, score_kind="embedding", supports_text=False, image_encode=image_encode,
+    )
+
+
+def _hf_siglip_encoder(spec: ModelSpec, device: torch.device) -> Encoder:
+    """Table 5's SigLIP surrogate: ``google/siglip-base-patch16-224`` (paper ref [69]).
+
+    Loaded via transformers.SiglipModel so both the image and text towers are usable, matching
+    how CLIP-style entries in T (text or image) are handled generically.
+    """
+    from transformers import AutoProcessor, SiglipModel
+
+    model = SiglipModel.from_pretrained(spec.name)
+    processor = AutoProcessor.from_pretrained(spec.name)
+    ip = processor.image_processor
+    size = getattr(ip, "size", {}) or {}
+    resolution = size.get("height") or size.get("width") or 224
+    mean = getattr(ip, "image_mean", _IMAGENET_MEAN)
+    std = getattr(ip, "image_std", _IMAGENET_STD)
+
+    def tokenizer(texts: List[str]) -> torch.Tensor:
+        enc = processor.tokenizer(
+            texts, padding="max_length", truncation=True, return_tensors="pt"
+        )
+        return enc["input_ids"]
+
+    return Encoder(
+        key=spec.key(), model=model, resolution=resolution, mean=mean, std=std,
+        device=device, score_kind="embedding", supports_text=True, tokenizer=tokenizer,
+        text_encode=lambda ids: model.get_text_features(input_ids=ids),
+        image_encode=lambda px: model.get_image_features(pixel_values=px),
     )
 
 
@@ -211,6 +274,8 @@ def _llamaguard_vision_encoder(spec: ModelSpec, device: torch.device) -> Encoder
 _LOADERS = {
     "openclip": _openclip_encoder,
     "dino": _dino_encoder,
+    "hf_dinov2": _hf_dinov2_encoder,
+    "hf_siglip": _hf_siglip_encoder,
     "moderation": _moderation_encoder,
     "shieldgemma2": _shieldgemma2_encoder,
     "llamaguard_vision": _llamaguard_vision_encoder,
