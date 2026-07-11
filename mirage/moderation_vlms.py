@@ -60,10 +60,16 @@ class _VLMModerator:
         self.dtype = next(model.parameters()).dtype  # cast our pixels to the model's dtype
         tok = getattr(processor, "tokenizer", processor)
 
+        # Disable Gemma3-style pan-and-scan so ONE input image yields ONE crop, not several.
+        # Since we substitute our own single differentiable view, extra crop slots would just
+        # be identical replicas -- pure wasted compute on the most expensive (4B) surrogate.
+        ip = getattr(processor, "image_processor", None)
+        if ip is not None and hasattr(ip, "do_pan_and_scan"):
+            ip.do_pan_and_scan = False
+
         # 1) Build the template ONCE on a dummy image to capture text/meta tensors + shapes.
-        # Some processors (e.g. Gemma3-style pan-and-scan) internally tile ONE input image
-        # into several crops, so pixel_values comes back as (views, 3, r, r) with views > 1
-        # even for a single image -- not (1, 3, r, r) as one might assume.
+        # Some processors may still return pixel_values as (views, 3, r, r) with views > 1;
+        # we handle that generically in unsafe_score.
         dummy = self._dummy_image(processor)
         enc = self._encode(processor, prompt_messages, dummy)
         pixel_shape = tuple(enc["pixel_values"].shape)                # e.g. (3,3,896,896)

@@ -13,6 +13,7 @@ S(x + delta) (objective.py) under an L-inf budget ||delta||_inf <= B, using:
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
@@ -51,6 +52,13 @@ def _project(x0: torch.Tensor, delta: torch.Tensor, budget: float) -> torch.Tens
     return delta
 
 
+def _amp(device: torch.device):
+    """bf16 autocast on CUDA (big forward/backward speedup, safe exponent range); no-op on CPU."""
+    if device.type == "cuda":
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    return nullcontext()
+
+
 def _ensemble_gradient(
     encoders: List[Encoder],
     keys: List[str],
@@ -77,7 +85,8 @@ def _ensemble_gradient(
     obj_val = 0.0
     for enc in encoders:
         if enc.key in active_set:
-            score = encoder_score(enc, x_in, cfg, patches)
+            with _amp(x0.device):
+                score = encoder_score(enc, x_in, cfg, patches)
             g = torch.autograd.grad(score, delta, retain_graph=True)[0]
             # Sanitize non-finite gradients so a single unstable surrogate (e.g. a large
             # VLM moderator) can never poison delta -- a NaN/Inf here would otherwise
@@ -97,7 +106,9 @@ def _ensemble_gradient(
 
 @torch.no_grad()
 def _full_objective(encoders: List[Encoder], x0: torch.Tensor, delta: torch.Tensor, cfg) -> float:
-    return float(total_objective(encoders, (x0 + delta).clamp(0, 1), cfg).item())
+    with _amp(x0.device):
+        val = total_objective(encoders, (x0 + delta).clamp(0, 1), cfg).item()
+    return float(val)
 
 
 def immunize(
