@@ -22,10 +22,12 @@ substitute our own differentiable, normalized pixel_values (they don't change th
 because the image size is fixed). See ``_VLMModerator``.
 
 IMPORTANT (honesty): both models are license-gated on Hugging Face (accept Google/Meta terms
-and authenticate with an HF token) and large (4B / 11B). These loaders are written to the
-documented API but are **GPU-only and untested in a CPU-only environment**; a shape/template
-tweak may be needed for your exact transformers version. They are opt-in and are NOT part of
-the default ensemble, which uses a lightweight NSFW classifier instead.
+and authenticate with an HF token) and large (4B / 11B) -- GPU-only. **ShieldGemma-2 is part
+of the default Table-5 ensemble**; Llama Guard 3 Vision remains an opt-in extra
+(`--vlm-moderators`), not part of Table 5's main-experiment config. These loaders are written
+to the documented API but the exact multi-crop preprocessing behavior can vary by
+`transformers` version -- see ``_VLMModerator.unsafe_score`` for how a differing number of
+internal crop views is handled.
 """
 
 from __future__ import annotations
@@ -58,9 +60,13 @@ class _VLMModerator:
         tok = getattr(processor, "tokenizer", processor)
 
         # 1) Build the template ONCE on a dummy image to capture text/meta tensors + shapes.
+        # Some processors (e.g. Gemma3-style pan-and-scan) internally tile ONE input image
+        # into several crops, so pixel_values comes back as (views, 3, r, r) with views > 1
+        # even for a single image -- not (1, 3, r, r) as one might assume.
         dummy = self._dummy_image(processor)
         enc = self._encode(processor, prompt_messages, dummy)
-        self._pixel_shape = tuple(enc["pixel_values"].shape)          # e.g. (1,3,896,896)
+        pixel_shape = tuple(enc["pixel_values"].shape)                # e.g. (3,3,896,896)
+        self._views_per_image = pixel_shape[0]
         self._cached = {k: v.to(device) for k, v in enc.items() if k != "pixel_values"}
 
         # 2) Resolve the {violating, safe} first-token ids for the two-way softmax.
@@ -96,7 +102,15 @@ class _VLMModerator:
         b = pixels.shape[0]
         scores = []
         for i in range(b):  # B is 1 for global-only VLM moderators
-            pv = pixels[i : i + 1].reshape(self._pixel_shape).to(self.device)
+            pv = pixels[i : i + 1]                            # (1,3,r,r)
+            if self._views_per_image > 1:
+                # Replicate our single (resized, differentiable) view across every internal
+                # crop slot the processor's multi-crop template expects. This loses the
+                # fine-grained detail true pan-and-scan crops would add, but keeps every
+                # slot showing valid, correctly-scaled content instead of crashing or
+                # feeding the model mismatched/garbage tensors.
+                pv = pv.repeat(self._views_per_image, 1, 1, 1)  # (views,3,r,r)
+            pv = pv.to(self.device)
             kwargs = {k: v for k, v in self._cached.items()}
             out = self.model(pixel_values=pv, **kwargs)
             last = out.logits[:, -1, :]                      # (1, vocab) first answer token
