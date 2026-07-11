@@ -83,8 +83,14 @@ class Encoder:
     ):
         self.key = key
         self.model = model.to(device).eval()
+        # Run surrogates in bf16 on CUDA: ~halves weight+activation memory (critical -- the
+        # fp32 path runs right at the 46GB edge and OOMs on large images) and cuts memory
+        # traffic. bf16 shares fp32's exponent range, so the attack stays numerically stable.
+        if device.type == "cuda":
+            self.model = self.model.to(torch.bfloat16)
         for p in self.model.parameters():
             p.requires_grad_(False)
+        self._mdtype = next(self.model.parameters()).dtype
         self.resolution = int(resolution)
         self.device = device
         self.score_kind = score_kind
@@ -104,7 +110,8 @@ class Encoder:
         if x.shape[-2:] != (r, r):
             x = F.interpolate(x, size=(r, r), mode="bicubic", align_corners=False)
         x = x.clamp(0, 1)
-        return (x - self._mean) / self._std
+        out = (x - self._mean) / self._std
+        return out.to(self._mdtype)  # match the (possibly bf16) model weights
 
     def embed_image(self, x: torch.Tensor) -> torch.Tensor:
         feats = _as_tensor(self._image_encode(self._preprocess(x)))
