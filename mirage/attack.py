@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional
 
 import torch
+from tqdm import tqdm
 
 from .augment import apply_random_augmentation
 from .config import MirageConfig
@@ -144,8 +145,15 @@ def immunize(
     api_enabled = cfg.select_by_public_api and bool(cfg.openai_moderation_key)
     best_ckpt = {"delta": delta.clone(), "api_score": -1.0}
 
+    # Per-step progress bar (advances every step with live it/s + ETA). Disabled when a
+    # custom `progress` callback is supplied. The `obj` shown is the cheap per-step score
+    # (active surrogates only); the accurate full-ensemble objective is recorded into
+    # `history` every `log_every` steps.
+    use_bar = progress is None
+    bar = tqdm(total=cfg.steps, desc="[MIRAGE] immunizing", unit="step") if use_bar else None
+
     for t in range(cfg.steps):
-        grad, _ = _ensemble_gradient(encoders, keys, x0, delta, cfg, cache)
+        grad, step_obj = _ensemble_gradient(encoders, keys, x0, delta, cfg, cache)
         step_size = cfg.step_size_at(t)  # cosine-scheduled per Table 5
         delta = delta + step_size * grad.sign()
         delta = _project(x0, delta, cfg.budget)
@@ -160,15 +168,24 @@ def immunize(
                 if score > best_ckpt["api_score"]:
                     best_ckpt = {"delta": delta.clone(), "api_score": score}
             except Exception as e:  # noqa: BLE001 - never let API hiccups kill the run
-                print(f"[MIRAGE] public moderation API error at step {t + 1}: {e!r}")
+                msg = f"[MIRAGE] public moderation API error at step {t + 1}: {e!r}"
+                bar.write(msg) if bar else print(msg)
+
+        if use_bar:
+            bar.update(1)
+            bar.set_postfix(obj=f"{step_obj:.3f}", lr=f"{step_size * 255:.2f}/255")
 
         if (t + 1) % cfg.log_every == 0 or t == cfg.steps - 1:
             obj = _full_objective(encoders, x0, delta, cfg)
             history.append(obj)
             if progress is not None:
                 progress(t + 1, obj)
-            else:
-                print(f"[MIRAGE] step {t + 1}/{cfg.steps}  objective={obj:.4f}")
+            elif bar is not None:
+                bar.set_postfix(obj=f"{step_obj:.3f}", full=f"{obj:.3f}",
+                                lr=f"{step_size * 255:.2f}/255")
+
+    if bar is not None:
+        bar.close()
 
     # Selection: by default return the final iterate (paper finds this comparable or better
     # than public-API checkpoint selection). Otherwise return the best C-tilde checkpoint.
