@@ -57,6 +57,7 @@ class _VLMModerator:
         self.model = model
         self.processor = processor
         self.device = device
+        self.dtype = next(model.parameters()).dtype  # cast our pixels to the model's dtype
         tok = getattr(processor, "tokenizer", processor)
 
         # 1) Build the template ONCE on a dummy image to capture text/meta tensors + shapes.
@@ -110,13 +111,19 @@ class _VLMModerator:
                 # slot showing valid, correctly-scaled content instead of crashing or
                 # feeding the model mismatched/garbage tensors.
                 pv = pv.repeat(self._views_per_image, 1, 1, 1)  # (views,3,r,r)
-            pv = pv.to(self.device)
+            pv = pv.to(self.device, dtype=self.dtype)        # match the model's dtype
             kwargs = {k: v for k, v in self._cached.items()}
             out = self.model(pixel_values=pv, **kwargs)
-            last = out.logits[:, -1, :]                      # (1, vocab) first answer token
+            last = out.logits[:, -1, :].float()              # fp32 for a stable softmax
             pair = torch.stack([last[0, self.violate_id], last[0, self.safe_id]])
             scores.append(torch.softmax(pair, dim=0)[0])     # P(violating)
         return torch.stack(scores)
+
+
+def _bf16_ok(device: torch.device) -> bool:
+    if device.type == "cuda":
+        return torch.cuda.is_bf16_supported()
+    return False  # CPU bf16 is slow/patchy; prefer fp32 there
 
 
 def _first_token_id(tokenizer, words: List[str]) -> int:
@@ -150,7 +157,15 @@ def _load_vlm(spec: ModelSpec, device, prompt, violate, safe) -> Encoder:
         from transformers import AutoModelForCausalLM as _AutoVLM
 
     processor = AutoProcessor.from_pretrained(spec.name)
-    model = _AutoVLM.from_pretrained(spec.name, torch_dtype=torch.float16).to(device).eval()
+    # bfloat16, NOT float16: a 4B transformer overflows fp16's 5-bit exponent (~65504),
+    # producing NaN activations/gradients that poison the whole PGD run. bf16 shares fp32's
+    # exponent range, so it stays finite. (Falls back to fp32 if the device lacks bf16.)
+    vlm_dtype = torch.bfloat16 if _bf16_ok(device) else torch.float32
+    try:
+        model = _AutoVLM.from_pretrained(spec.name, dtype=vlm_dtype)
+    except TypeError:  # older transformers use torch_dtype
+        model = _AutoVLM.from_pretrained(spec.name, torch_dtype=vlm_dtype)
+    model = model.to(device).eval()
     for p in model.parameters():
         p.requires_grad_(False)
 

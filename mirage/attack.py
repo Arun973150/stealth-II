@@ -78,14 +78,19 @@ def _ensemble_gradient(
         if enc.key in active_set:
             score = encoder_score(enc, x_in, cfg, patches)
             g = torch.autograd.grad(score, delta, retain_graph=True)[0]
+            # Sanitize non-finite gradients so a single unstable surrogate (e.g. a large
+            # VLM moderator) can never poison delta -- a NaN/Inf here would otherwise
+            # propagate into delta and make every subsequent objective NaN.
+            g = torch.nan_to_num(g, nan=0.0, posinf=0.0, neginf=0.0)
+            s = float(score.detach())
             total_grad = total_grad + g
-            obj_val += float(score.detach())
+            obj_val += s if s == s else 0.0  # skip NaN scores in the running total
             if cache is not None:
                 cache.update(enc.key, delta, g)
         elif cache is not None:
             g_approx = cache.approximate(enc.key, delta.detach())
             if g_approx is not None:
-                total_grad = total_grad + g_approx
+                total_grad = total_grad + torch.nan_to_num(g_approx)
     return total_grad.detach(), obj_val
 
 

@@ -144,11 +144,24 @@ class Encoder:
 # --------------------------------------------------------------------------------------
 # Loaders
 # --------------------------------------------------------------------------------------
+# Checkpoint families trained with QuickGELU activation. When such a tag is loaded under a
+# plain (non-quickgelu) architecture name, open_clip warns of a mismatch and silently uses
+# standard GELU -- the wrong activation -- degrading the embeddings. We force QuickGELU for
+# these. (We do this via force_quick_gelu instead of a "-quickgelu" arch name because e.g.
+# the tag `dfn2b_s39b` is registered only under the plain `ViT-L-14`, not `ViT-L-14-quickgelu`.)
+_QUICKGELU_TAGS = ("dfn", "openai", "metaclip")
+
+
+def _needs_quick_gelu(pretrained: Optional[str]) -> bool:
+    return bool(pretrained) and any(t in pretrained for t in _QUICKGELU_TAGS)
+
+
 def _openclip_encoder(spec: ModelSpec, device: torch.device) -> Encoder:
     import open_clip
 
     model, _, preprocess = open_clip.create_model_and_transforms(
-        spec.name, pretrained=spec.pretrained
+        spec.name, pretrained=spec.pretrained,
+        force_quick_gelu=_needs_quick_gelu(spec.pretrained),
     )
     tokenizer = open_clip.get_tokenizer(spec.name)
     resolution = _openclip_resolution(model, preprocess)
