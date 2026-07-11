@@ -45,6 +45,23 @@ _CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
 _CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
 
 
+def _as_tensor(x):
+    """Normalize an encoder's output to a plain tensor.
+
+    Some HF methods that are documented to return a pooled tensor (e.g.
+    ``get_text_features`` / ``get_image_features``) return a raw model-output object
+    (``BaseModelOutputWithPooling``) instead, depending on the installed ``transformers``
+    version. Handle both so a version difference doesn't crash the whole ensemble.
+    """
+    if isinstance(x, torch.Tensor):
+        return x
+    if hasattr(x, "pooler_output") and x.pooler_output is not None:
+        return x.pooler_output
+    if hasattr(x, "last_hidden_state"):
+        return x.last_hidden_state[:, 0, :]  # CLS-token fallback
+    raise TypeError(f"Unexpected encoder output type: {type(x)}")
+
+
 class Encoder:
     """Unified wrapper around a single surrogate model."""
 
@@ -90,7 +107,7 @@ class Encoder:
         return (x - self._mean) / self._std
 
     def embed_image(self, x: torch.Tensor) -> torch.Tensor:
-        feats = self._image_encode(self._preprocess(x))
+        feats = _as_tensor(self._image_encode(self._preprocess(x)))
         return F.normalize(feats, dim=-1)
 
     # ---- unified per-view score (differentiable) ----
@@ -110,7 +127,7 @@ class Encoder:
         embs: List[torch.Tensor] = []
         if self.supports_text and targets.texts:
             tokens = self._tokenizer(targets.texts).to(self.device)
-            embs.append(F.normalize(self._text_encode(tokens), dim=-1))
+            embs.append(F.normalize(_as_tensor(self._text_encode(tokens)), dim=-1))
         for img in targets.images:
             arr = torch.from_numpy(
                 np.asarray(img.convert("RGB"), dtype=np.float32) / 255.0
