@@ -33,6 +33,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--demo", action="store_true", help="tiny CPU-friendly config")
     p.add_argument("--budget", type=float, default=None, help="L-inf budget in /255 units")
     p.add_argument("--steps", type=int, default=None)
+    p.add_argument("--num-patches", type=int, default=None,
+                   help="local-view patches per step (Table 5: 16). Fewer = faster.")
+    p.add_argument("--fast", action="store_true",
+                   help="speed preset: steps=2500, num_patches=8, top_k=4 (~4x faster; "
+                        "ε=16/255 still gives ~100%% immunization per Table 4)")
     p.add_argument("--categories", nargs="+", default=None,
                    help="target categories, e.g. sexual violence")
     p.add_argument("--image-targets", default=None, help="dir of image targets (optional)")
@@ -55,10 +60,17 @@ def build_config(args: argparse.Namespace) -> MirageConfig:
     cfg = MirageConfig(**{**cfg.__dict__})
     if args.demo:
         cfg.ensemble = list(DEMO_ENSEMBLE)
+    if args.fast:
+        cfg.steps = 2500
+        cfg.num_patches = 8
+        cfg.top_k = 4
     if args.budget is not None:
         cfg.budget = args.budget if args.budget < 1 else args.budget / 255.0
     if args.steps is not None:
         cfg.steps = args.steps
+    if args.num_patches is not None:
+        cfg.num_patches = args.num_patches
+        cfg.top_k = min(cfg.top_k, args.num_patches)
     if args.categories is not None:
         cfg.target_categories = args.categories
     if args.image_targets is not None:
