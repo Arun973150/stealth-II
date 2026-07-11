@@ -43,6 +43,14 @@ def parse_args() -> argparse.Namespace:
                    help="use ONLY text targets for the local patches (image targets stay on "
                         "the global view). Removes explicit high-res painting from the "
                         "perturbation while keeping the refusal signal.")
+    p.add_argument("--no-vlm-mod", action="store_true",
+                   help="drop the 4B ShieldGemma-2 moderator for FAST visual iteration "
+                        "(~1.7x faster). It drives refusal, not the visible painting, so use "
+                        "this to screen the LOOK of combos, then confirm REFUSAL with the "
+                        "full ensemble (without this flag).")
+    p.add_argument("--screen", action="store_true",
+                   help="fast visual-screening preset: steps=800, num_patches=4, --no-vlm-mod "
+                        "(~10-12 min). For eyeballing the perturbation's look, NOT refusal.")
     p.add_argument("--fast", action="store_true",
                    help="speed preset: steps=2500, num_patches=8, top_k=4 (~4x faster; "
                         "ε=16/255 still gives ~100%% immunization per Table 4)")
@@ -72,6 +80,11 @@ def build_config(args: argparse.Namespace) -> MirageConfig:
         cfg.steps = 2500
         cfg.num_patches = 8
         cfg.top_k = 4
+    if args.screen:
+        cfg.steps = 800
+        cfg.num_patches = 4
+        cfg.top_k = 2
+        args.no_vlm_mod = True
     if args.budget is not None:
         cfg.budget = args.budget if args.budget < 1 else args.budget / 255.0
     if args.steps is not None:
@@ -83,6 +96,9 @@ def build_config(args: argparse.Namespace) -> MirageConfig:
         cfg.lambda_local = args.lambda_local
     if args.local_text_only:
         cfg.local_text_only = True
+    if args.no_vlm_mod:
+        cfg.ensemble = [m for m in cfg.ensemble
+                        if m.kind not in ("shieldgemma2", "llamaguard_vision")]
     if args.categories is not None:
         cfg.target_categories = args.categories
     if args.image_targets is not None:
