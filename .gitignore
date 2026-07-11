@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Model / HF caches if ever redirected into the repo
+.cache/
+*.safetensors
+*.bin
+*.pt
+*.ckpt
+
+# Never commit target images or immunization outputs -- may include sensitive
+# or explicit reference material, or personal photos.
+targets/
+image_targets/
+outputs/
+*.immunized.*
