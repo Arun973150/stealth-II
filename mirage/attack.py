@@ -45,9 +45,16 @@ class ImmunizeResult:
     history: List[float]         # objective per logged step
 
 
-def _project(x0: torch.Tensor, delta: torch.Tensor, budget: float) -> torch.Tensor:
-    """Project delta to the L-inf ball and keep x0+delta a valid image in [0,1]."""
+def _project(
+    x0: torch.Tensor, delta: torch.Tensor, budget: float,
+    mask: Optional[torch.Tensor] = None, achromatic: bool = False,
+) -> torch.Tensor:
+    """Project delta to the L-inf ball, restrict it to `mask`, keep x0+delta in [0,1]."""
     delta = torch.clamp(delta, -budget, budget)
+    if mask is not None:
+        delta = delta * mask  # zero perturbation outside the allowed region
+    if achromatic:
+        delta = delta.mean(dim=1, keepdim=True).expand(-1, delta.shape[1], -1, -1)
     delta = torch.clamp(x0 + delta, 0.0, 1.0) - x0
     return delta
 
@@ -141,6 +148,15 @@ def immunize(
         image = image.unsqueeze(0)
     x0 = image.to(device).clamp(0, 1)
 
+    # Optional spatial mask: restrict the perturbation to background / edges (keeps the
+    # subject visually clean). Built once from the source image.
+    mask = None
+    if cfg.mask:
+        from .masks import build_mask
+        mask = build_mask(cfg.mask, x0, device)
+        frac = float(mask.mean().item())
+        print(f"[MIRAGE] mask='{cfg.mask}' -> perturbing {frac * 100:.1f}% of the image")
+
     # ---- build ensemble + attach targets (unless a prepared one is provided) ----
     if encoders is None:
         base = build_ensemble(cfg.ensemble, device)
@@ -157,7 +173,7 @@ def immunize(
         delta = (torch.rand_like(x0) * 2 - 1) * cfg.budget
     else:
         delta = torch.zeros_like(x0)
-    delta = _project(x0, delta, cfg.budget)
+    delta = _project(x0, delta, cfg.budget, mask, cfg.achromatic)
 
     history: List[float] = []
     # Public-API checkpoint selection state (Sec. 4.3); only used if enabled + key present.
@@ -175,7 +191,7 @@ def immunize(
         grad, step_obj = _ensemble_gradient(encoders, keys, x0, delta, cfg, cache)
         step_size = cfg.step_size_at(t)  # cosine-scheduled per Table 5
         delta = delta + step_size * grad.sign()
-        delta = _project(x0, delta, cfg.budget)
+        delta = _project(x0, delta, cfg.budget, mask, cfg.achromatic)
 
         # Checkpoint every `checkpoint_every` steps: optionally score the checkpoint under
         # the public moderator C-tilde and keep the highest-scoring one (early stopping).

@@ -43,6 +43,14 @@ def parse_args() -> argparse.Namespace:
                    help="use ONLY text targets for the local patches (image targets stay on "
                         "the global view). Removes explicit high-res painting from the "
                         "perturbation while keeping the refusal signal.")
+    p.add_argument("--mask", default=None, metavar="SPEC",
+                   help="restrict the perturbation spatially to keep the subject clean: "
+                        "'background' (segment the person, perturb only behind them) or "
+                        "'border:0.25' (perturb only an outer frame). Reduces the imprint on "
+                        "the subject; may weaken refusal.")
+    p.add_argument("--achromatic", action="store_true",
+                   help="force the perturbation to be greyscale (no color painted); the "
+                        "imprint reads as grey texture instead of flesh-toned content.")
     p.add_argument("--no-vlm-mod", action="store_true",
                    help="drop the 4B ShieldGemma-2 moderator for FAST visual iteration "
                         "(~1.7x faster). It drives refusal, not the visible painting, so use "
@@ -96,6 +104,10 @@ def build_config(args: argparse.Namespace) -> MirageConfig:
         cfg.lambda_local = args.lambda_local
     if args.local_text_only:
         cfg.local_text_only = True
+    if args.mask is not None:
+        cfg.mask = args.mask
+    if args.achromatic:
+        cfg.achromatic = True
     if args.no_vlm_mod:
         cfg.ensemble = [m for m in cfg.ensemble
                         if m.kind not in ("shieldgemma2", "llamaguard_vision")]

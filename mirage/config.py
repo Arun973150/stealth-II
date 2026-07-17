@@ -93,6 +93,12 @@ class MirageConfig:
                                         # patches align to text only -> avoids the attack
                                         # "painting" explicit high-res target detail.
 
+    # ---- Spatial mask (restrict WHERE delta is applied) ----
+    mask: Optional[str] = None         # None | "background" | "border:<frac>" -- keep the
+                                        # subject clean by perturbing only background/edges.
+    achromatic: bool = False           # force delta to be greyscale (equal RGB channels) ->
+                                        # no color is painted, imprint reads as grey texture.
+
     # ---- Augmentations (Sec. 4.3) ----
     use_augmentations: bool = True
     aug_prob: float = 0.9              # prob. of applying an augmentation on a given step
