@@ -117,6 +117,18 @@ class MirageConfig:
     select_by_public_api: bool = False  # paper finds omitting this performs comparably/better
     openai_moderation_key: Optional[str] = None
 
+    # ---- Borderline early-stop (return the minimal-imprint checkpoint that already refuses) ----
+    # The plain objective (Eq. 1) is *unbounded* -- PGD keeps painting the target deeper long
+    # after the moderator has flipped, adding visible sexual content with no refusal benefit.
+    # These knobs stop at the *boundary*: return the FIRST checkpoint whose gate metric crosses
+    # a threshold, giving the least-visible perturbation that still triggers moderation. Reuses
+    # the same "evaluate a moderator mid-run and keep a checkpoint" idea as Sec. 4.3, inverted
+    # (earliest-crossing instead of highest-scoring). Both default to None (disabled).
+    stop_at_objective: Optional[float] = None  # stop at first checkpoint with S(x) >= this.
+                                                # Calibration: S~5.9 refused, S~3.4 did not.
+    stop_at_violate: Optional[float] = None     # or gate on mean ShieldGemma-2 P(violate) >= this.
+    gate_check_every: int = 25                  # how often (steps) to evaluate the stop gate.
+
     # ---- Runtime ----
     device: str = "auto"               # "auto" | "cpu" | "cuda"
     seed: int = 0

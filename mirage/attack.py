@@ -43,6 +43,9 @@ class ImmunizeResult:
     linf_255: float              # perturbation L-inf in 0-255 units
     psnr_db: float               # PSNR vs original
     history: List[float]         # objective per logged step
+    stopped_at_step: Optional[int] = None   # borderline early-stop step (None = ran full)
+    gate_metric: Optional[float] = None      # gate value at the returned checkpoint
+    gate_label: Optional[str] = None         # "S" or "P(viol)"
 
 
 def _project(
@@ -118,6 +121,33 @@ def _full_objective(encoders: List[Encoder], x0: torch.Tensor, delta: torch.Tens
     return float(val)
 
 
+@torch.no_grad()
+def _violate_prob(mod_encoders: List[Encoder], x0: torch.Tensor, delta: torch.Tensor) -> float:
+    """Mean P(violate) of the moderation surrogates on the CLEAN (un-augmented) image.
+
+    Evaluated on x0+delta with no augmentation so the gate reading is deterministic given
+    delta -- no augmentation noise flipping the stop decision back and forth.
+    """
+    x = (x0 + delta).clamp(0, 1)
+    ps: List[float] = []
+    with _amp(x0.device):
+        for enc in mod_encoders:
+            s = enc.view_score(x, local=False)  # (B,) P(violate) for a moderation encoder
+            if s is not None:
+                ps.append(float(s.mean().item()))
+    return sum(ps) / len(ps) if ps else float("nan")
+
+
+def _gate_metric(
+    encoders: List[Encoder], mod_encoders: List[Encoder],
+    x0: torch.Tensor, delta: torch.Tensor, cfg,
+) -> tuple:
+    """(value, label) for the active borderline gate: ShieldGemma P(violate) or objective S."""
+    if cfg.stop_at_violate is not None:
+        return _violate_prob(mod_encoders, x0, delta), "P(viol)"
+    return _full_objective(encoders, x0, delta, cfg), "S"
+
+
 def immunize(
     image: torch.Tensor,
     cfg: Optional[MirageConfig] = None,
@@ -186,6 +216,18 @@ def immunize(
     api_enabled = cfg.select_by_public_api and bool(cfg.openai_moderation_key)
     best_ckpt = {"delta": delta.clone(), "api_score": -1.0}
 
+    # Borderline early-stop state: return the FIRST checkpoint whose gate metric crosses the
+    # threshold (minimal imprint that already refuses), instead of pushing S to its max.
+    mod_encoders = [e for e in encoders if e.score_kind == "moderation"]
+    gate_active = (cfg.stop_at_objective is not None) or (cfg.stop_at_violate is not None)
+    gate_threshold = (cfg.stop_at_violate if cfg.stop_at_violate is not None
+                      else cfg.stop_at_objective)
+    if cfg.stop_at_violate is not None and not mod_encoders:
+        print("[MIRAGE] --stop-at-violate set but no moderation surrogate in the ensemble; "
+              "disabling the borderline gate.")
+        gate_active = False
+    border: Optional[dict] = None
+
     # Per-step progress bar (advances every step with live it/s + ETA). Disabled when a
     # custom `progress` callback is supplied. The `obj` shown is the cheap per-step score
     # (active surrogates only); the accurate full-ensemble objective is recorded into
@@ -198,6 +240,25 @@ def immunize(
         step_size = cfg.step_size_at(t)  # cosine-scheduled per Table 5
         delta = delta + step_size * grad.sign()
         delta = _project(x0, delta, cfg.budget, mask, cfg.achromatic)
+
+        # Borderline early-stop: the moment the gate metric first crosses the threshold, keep
+        # THAT checkpoint and stop -- every later step only paints the target deeper (more
+        # visible sexual content) without buying more refusal. Evaluated on the clean image.
+        if gate_active and (t + 1) % cfg.gate_check_every == 0:
+            metric, label = _gate_metric(encoders, mod_encoders, x0, delta, cfg)
+            if bar is not None:
+                bar.set_postfix(**{label: f"{metric:.3f}",
+                                   "lr": f"{step_size * 255:.2f}/255"})
+            if metric >= gate_threshold:
+                border = {"delta": delta.clone(), "step": t + 1,
+                          "metric": metric, "label": label}
+                m = (f"[MIRAGE] borderline reached: {label}={metric:.3f} >= "
+                     f"{gate_threshold} at step {t + 1}; stopping early "
+                     f"(minimal imprint that clears the gate).")
+                bar.write(m) if bar is not None else print(m)
+                if bar is not None:
+                    bar.update(1)
+                break
 
         # Checkpoint every `checkpoint_every` steps: optionally score the checkpoint under
         # the public moderator C-tilde and keep the highest-scoring one (early stopping).
@@ -228,9 +289,15 @@ def immunize(
     if bar is not None:
         bar.close()
 
-    # Selection: by default return the final iterate (paper finds this comparable or better
-    # than public-API checkpoint selection). Otherwise return the best C-tilde checkpoint.
-    chosen = best_ckpt["delta"] if api_enabled else delta
+    # Selection priority: (1) borderline early-stop checkpoint if the gate was crossed, else
+    # (2) the best C-tilde checkpoint if public-API selection is on, else (3) the final iterate
+    # (paper finds this comparable or better than public-API checkpoint selection).
+    if border is not None:
+        chosen = border["delta"]
+    elif api_enabled:
+        chosen = best_ckpt["delta"]
+    else:
+        chosen = delta
     x_hat = (x0 + chosen).clamp(0, 1)
     return ImmunizeResult(
         image=x_hat.detach().cpu(),
@@ -239,4 +306,7 @@ def immunize(
         linf_255=linf(x_hat, x0),
         psnr_db=psnr(x_hat, x0),
         history=history,
+        stopped_at_step=(border["step"] if border is not None else None),
+        gate_metric=(border["metric"] if border is not None else None),
+        gate_label=(border["label"] if border is not None else None),
     )

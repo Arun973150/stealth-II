@@ -69,6 +69,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fast", action="store_true",
                    help="speed preset: steps=2500, num_patches=8, top_k=4 (~4x faster; "
                         "ε=16/255 still gives ~100%% immunization per Table 4)")
+    p.add_argument("--stop-at-objective", type=float, default=None, metavar="S",
+                   help="BORDERLINE mode: stop at the first checkpoint whose full ensemble "
+                        "objective S(x) reaches this, and return it -- the least-visible "
+                        "perturbation that already refuses (later steps only paint the target "
+                        "deeper for no refusal gain). Calibration from our runs: S~5.9 "
+                        "refused, S~3.4 did not -> try 5.0-5.5.")
+    p.add_argument("--stop-at-violate", type=float, default=None, metavar="P",
+                   help="BORDERLINE mode gating on ShieldGemma-2 P(violate) instead of S; "
+                        "stop at first checkpoint with mean P(violate) >= this (e.g. 0.9). "
+                        "Caveat: ShieldGemma may saturate early and not transfer to the real "
+                        "API -- prefer --stop-at-objective unless you confirm on the API.")
+    p.add_argument("--gate-check-every", type=int, default=None, metavar="N",
+                   help="how often (steps) to evaluate the borderline stop gate (default 25).")
     p.add_argument("--categories", nargs="+", default=None,
                    help="target categories, e.g. sexual violence")
     p.add_argument("--image-targets", default=None, help="dir of image targets (optional)")
@@ -122,6 +135,12 @@ def build_config(args: argparse.Namespace) -> MirageConfig:
     if args.no_vlm_mod:
         cfg.ensemble = [m for m in cfg.ensemble
                         if m.kind not in ("shieldgemma2", "llamaguard_vision")]
+    if args.stop_at_objective is not None:
+        cfg.stop_at_objective = args.stop_at_objective
+    if args.stop_at_violate is not None:
+        cfg.stop_at_violate = args.stop_at_violate
+    if args.gate_check_every is not None:
+        cfg.gate_check_every = args.gate_check_every
     if args.categories is not None:
         cfg.target_categories = args.categories
     if args.image_targets is not None:
@@ -158,6 +177,10 @@ def main() -> None:
     print(f"  objective S(x_hat) = {result.objective:.4f}")
     print(f"  L-inf perturbation = {result.linf_255:.1f}/255")
     print(f"  PSNR               = {result.psnr_db:.2f} dB")
+    if result.stopped_at_step is not None:
+        print(f"  borderline stop    = step {result.stopped_at_step} "
+              f"({result.gate_label}={result.gate_metric:.3f}) "
+              f"-- minimal imprint that cleared the gate")
     print(f"  saved -> {args.output}")
 
 
