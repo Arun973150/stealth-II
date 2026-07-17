@@ -14,9 +14,10 @@ venv/
 *.pt
 *.ckpt
 
-# Never commit target images or immunization outputs -- may include sensitive
-# or explicit reference material, or personal photos.
+# Never commit target images, personal photos, or immunization outputs --
+# may include sensitive/explicit reference material or personal photos.
 targets/
 image_targets/
+photos/
 outputs/
 *.immunized.*
