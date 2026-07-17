@@ -179,7 +179,9 @@ class Encoder:
 # standard GELU -- the wrong activation -- degrading the embeddings. We force QuickGELU for
 # these. (We do this via force_quick_gelu instead of a "-quickgelu" arch name because e.g.
 # the tag `dfn2b_s39b` is registered only under the plain `ViT-L-14`, not `ViT-L-14-quickgelu`.)
-_QUICKGELU_TAGS = ("dfn", "openai", "metaclip")
+# NOTE: not all DFN checkpoints are quickgelu -- dfn5b is (loaded via the ViT-H-14-quickgelu
+# model name) but dfn2b_s39b is registered NON-quickgelu, so we must NOT force it here.
+_QUICKGELU_TAGS = ("openai", "metaclip")
 
 
 def _needs_quick_gelu(pretrained: Optional[str]) -> bool:

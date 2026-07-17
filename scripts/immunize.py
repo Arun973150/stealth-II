@@ -51,6 +51,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--achromatic", action="store_true",
                    help="force the perturbation to be greyscale (no color painted); the "
                         "imprint reads as grey texture instead of flesh-toned content.")
+    p.add_argument("--perceptual", action="store_true",
+                   help="JND/contrast masking: weight delta by local texture so smooth skin "
+                        "stays clean and the noise hides in busy regions. Stacks with --mask "
+                        "and --achromatic. The most principled 'less visible' knob.")
+    p.add_argument("--perceptual-floor", type=float, default=None,
+                   help="min budget multiplier in smooth regions for --perceptual "
+                        "(default 0.25; lower = cleaner skin but less signal there).")
     p.add_argument("--no-vlm-mod", action="store_true",
                    help="drop the 4B ShieldGemma-2 moderator for FAST visual iteration "
                         "(~1.7x faster). It drives refusal, not the visible painting, so use "
@@ -108,6 +115,10 @@ def build_config(args: argparse.Namespace) -> MirageConfig:
         cfg.mask = args.mask
     if args.achromatic:
         cfg.achromatic = True
+    if args.perceptual:
+        cfg.perceptual = True
+    if args.perceptual_floor is not None:
+        cfg.perceptual_floor = args.perceptual_floor
     if args.no_vlm_mod:
         cfg.ensemble = [m for m in cfg.ensemble
                         if m.kind not in ("shieldgemma2", "llamaguard_vision")]

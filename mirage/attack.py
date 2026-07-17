@@ -148,14 +148,20 @@ def immunize(
         image = image.unsqueeze(0)
     x0 = image.to(device).clamp(0, 1)
 
-    # Optional spatial mask: restrict the perturbation to background / edges (keeps the
-    # subject visually clean). Built once from the source image.
+    # Optional spatial weighting on delta (built once from the source image). A binary
+    # region mask and a continuous perceptual weight both just multiply delta, so we fold
+    # them into a single `mask` tensor passed to the projection step.
     mask = None
     if cfg.mask:
         from .masks import build_mask
         mask = build_mask(cfg.mask, x0, device)
-        frac = float(mask.mean().item())
-        print(f"[MIRAGE] mask='{cfg.mask}' -> perturbing {frac * 100:.1f}% of the image")
+        print(f"[MIRAGE] mask='{cfg.mask}' -> perturbing {mask.mean().item() * 100:.1f}%")
+    if cfg.perceptual:
+        from .masks import perceptual_weight
+        pw = perceptual_weight(x0, device, cfg.perceptual_floor)
+        mask = pw if mask is None else mask * pw
+        print(f"[MIRAGE] perceptual JND mask (floor={cfg.perceptual_floor}) -> "
+              f"mean budget multiplier {pw.mean().item():.2f}")
 
     # ---- build ensemble + attach targets (unless a prepared one is provided) ----
     if encoders is None:

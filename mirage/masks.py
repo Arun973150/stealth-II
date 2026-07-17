@@ -48,6 +48,36 @@ def _border_mask(image: torch.Tensor, frac: float) -> torch.Tensor:
 
 
 @torch.no_grad()
+def perceptual_weight(
+    image: torch.Tensor, device: torch.device,
+    floor: float = 0.25, window: int = 11, pct: float = 0.9,
+) -> torch.Tensor:
+    """Continuous JND / contrast-masking weight in [floor, 1], shape (1,1,H,W).
+
+    Human vision hides high-frequency noise in textured regions but exposes it on smooth
+    ones (skin, sky, walls). We estimate local texture as the local standard deviation of
+    luminance and map it to a per-pixel budget multiplier: ~1 in busy regions (perturb
+    freely, the eye won't notice), ~floor in smooth regions (spare them). Multiplying delta
+    by this weight tucks the perturbation into texture and keeps smooth areas clean, while
+    the L-inf budget still bounds the whole image.
+    """
+    img = image.to(device)
+    lum = 0.299 * img[:, 0:1] + 0.587 * img[:, 1:2] + 0.114 * img[:, 2:3]  # (1,1,H,W)
+    pad = window // 2
+    mean = F.avg_pool2d(lum, window, 1, pad, count_include_pad=False)
+    mean_sq = F.avg_pool2d(lum * lum, window, 1, pad, count_include_pad=False)
+    std = (mean_sq - mean * mean).clamp_min(0).sqrt()        # local texture / contrast
+
+    # Reference = high percentile of texture so busy regions saturate to weight 1.
+    flat = std.flatten()
+    if flat.numel() > 500_000:  # subsample -- torch.quantile is heavy on millions of px
+        flat = flat[torch.randint(0, flat.numel(), (500_000,), device=flat.device)]
+    ref = torch.quantile(flat, pct).clamp_min(1e-6)
+    w = (std / ref).clamp(0, 1)
+    return floor + (1.0 - floor) * w                          # (1,1,H,W) in [floor, 1]
+
+
+@torch.no_grad()
 def _background_mask(image: torch.Tensor, device: torch.device, feather: int = 9) -> torch.Tensor:
     """Perturb only the background: 1 outside the segmented person, 0 on the person."""
     import torchvision

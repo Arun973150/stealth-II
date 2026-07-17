@@ -42,8 +42,8 @@ DEFAULT_ENSEMBLE: List[ModelSpec] = [
     ModelSpec("openclip", "ViT-B-32", "laion2b_s34b_b79k"),
     ModelSpec("openclip", "ViT-B-16", "laion2b_s34b_b88k"),
     ModelSpec("openclip", "ViT-L-14", "datacomp_xl_s13b_b90k"),
-    ModelSpec("openclip", "ViT-L-14", "dfn2b_s39b"),
-    ModelSpec("openclip", "ViT-H-14", "dfn5b"),
+    ModelSpec("openclip", "ViT-L-14", "dfn2b_s39b"),      # registered non-quickgelu
+    ModelSpec("openclip", "ViT-H-14-quickgelu", "dfn5b"),  # dfn5b needs quickgelu activation
     ModelSpec("shieldgemma2", "google/shieldgemma-2-4b-it"),
 ]
 
@@ -98,6 +98,9 @@ class MirageConfig:
                                         # subject clean by perturbing only background/edges.
     achromatic: bool = False           # force delta to be greyscale (equal RGB channels) ->
                                         # no color is painted, imprint reads as grey texture.
+    perceptual: bool = False           # JND / contrast masking: weight delta by local texture
+                                        # so smooth skin stays clean, noise hides in busy areas.
+    perceptual_floor: float = 0.25     # min budget multiplier in smooth regions (0..1).
 
     # ---- Augmentations (Sec. 4.3) ----
     use_augmentations: bool = True
