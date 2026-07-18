@@ -21,9 +21,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-_IMAGENET_MEAN = (0.485, 0.456, 0.406)
-_IMAGENET_STD = (0.229, 0.224, 0.225)
-_VOC_PERSON_CLASS = 15  # DeepLabV3 (VOC labels): "person"
+_COCO_PERSON_CLASS = 1  # Mask R-CNN (COCO labels): "person"
 
 
 def build_mask(spec: str, image: torch.Tensor, device: torch.device) -> torch.Tensor:
@@ -78,27 +76,41 @@ def perceptual_weight(
 
 
 @torch.no_grad()
-def _background_mask(image: torch.Tensor, device: torch.device, feather: int = 9) -> torch.Tensor:
-    """Perturb only the background: 1 outside the segmented person, 0 on the person."""
+def _background_mask(
+    image: torch.Tensor, device: torch.device, feather: int = 9,
+    max_dim: int = 800, score_thresh: float = 0.5,
+) -> torch.Tensor:
+    """Perturb only the background: 1 outside every detected person, 0 on people.
+
+    Uses Mask R-CNN (COCO instance segmentation) rather than a single-blob semantic
+    segmenter: it detects each person as a separate instance and we union their masks,
+    which holds up far better on group photos than a semantic model that tends to merge
+    overlapping people into one blob or miss smaller/farther ones entirely.
+    """
     import torchvision
 
-    seg = torchvision.models.segmentation.deeplabv3_resnet101(weights="DEFAULT")
-    seg = seg.to(device).eval()
+    det = torchvision.models.detection.maskrcnn_resnet50_fpn(weights="DEFAULT")
+    det = det.to(device).eval()
 
     _, _, h, w = image.shape
-    # DeepLabV3 is happiest around 512px on the long side.
-    scale = 520 / max(h, w)
+    scale = min(1.0, max_dim / max(h, w))
     rh, rw = max(1, int(h * scale)), max(1, int(w * scale))
     x = F.interpolate(image.to(device), size=(rh, rw), mode="bilinear", align_corners=False)
-    mean = torch.tensor(_IMAGENET_MEAN, device=device).view(1, 3, 1, 1)
-    std = torch.tensor(_IMAGENET_STD, device=device).view(1, 3, 1, 1)
-    logits = seg((x - mean) / std)["out"]                    # (1, 21, rh, rw)
-    person = (logits.argmax(1, keepdim=True) == _VOC_PERSON_CLASS).float()
+
+    # Mask R-CNN does its own input normalization; feed it a list of (3,H,W) in [0,1].
+    out = det(list(x))[0]
+    keep = (out["labels"] == _COCO_PERSON_CLASS) & (out["scores"] >= score_thresh)
+    person_masks = out["masks"][keep]  # (N,1,rh,rw) soft masks, one per detected person
+
+    if person_masks.numel() > 0:
+        person = (person_masks > 0.5).any(dim=0, keepdim=True).float()  # (1,1,rh,rw)
+    else:
+        person = torch.zeros(1, 1, rh, rw, device=device)
 
     # Dilate the person region so its silhouette edge is also protected (feathering).
     if feather > 1:
         person = F.max_pool2d(person, kernel_size=feather, stride=1, padding=feather // 2)
     person = F.interpolate(person, size=(h, w), mode="nearest")
     background = 1.0 - person
-    del seg
+    del det
     return background  # (1,1,H,W)
