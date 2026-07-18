@@ -51,6 +51,7 @@ class ImmunizeResult:
 def _project(
     x0: torch.Tensor, delta: torch.Tensor, budget: float,
     mask: Optional[torch.Tensor] = None, achromatic: bool = False,
+    color_match: bool = False,
 ) -> torch.Tensor:
     """Project delta to the L-inf ball, restrict it to `mask`, keep x0+delta in [0,1]."""
     delta = torch.clamp(delta, -budget, budget)
@@ -58,6 +59,13 @@ def _project(
         delta = delta * mask  # zero perturbation outside the allowed region
     if achromatic:
         delta = delta.mean(dim=1, keepdim=True).expand(-1, delta.shape[1], -1, -1)
+    elif color_match:
+        # Same per-pixel-mean collapse as achromatic, but re-tinted by the source image's
+        # own average channel balance instead of flattened to neutral grey.
+        gray = delta.mean(dim=1, keepdim=True)
+        channel_mean = x0.mean(dim=(0, 2, 3)).clamp(min=1e-3)
+        weights = (channel_mean / channel_mean.mean()).view(1, -1, 1, 1)
+        delta = gray * weights
     delta = torch.clamp(x0 + delta, 0.0, 1.0) - x0
     return delta
 
@@ -209,7 +217,7 @@ def immunize(
         delta = (torch.rand_like(x0) * 2 - 1) * cfg.budget
     else:
         delta = torch.zeros_like(x0)
-    delta = _project(x0, delta, cfg.budget, mask, cfg.achromatic)
+    delta = _project(x0, delta, cfg.budget, mask, cfg.achromatic, cfg.color_match)
 
     history: List[float] = []
     # Public-API checkpoint selection state (Sec. 4.3); only used if enabled + key present.
@@ -239,7 +247,7 @@ def immunize(
         grad, step_obj = _ensemble_gradient(encoders, keys, x0, delta, cfg, cache)
         step_size = cfg.step_size_at(t)  # cosine-scheduled per Table 5
         delta = delta + step_size * grad.sign()
-        delta = _project(x0, delta, cfg.budget, mask, cfg.achromatic)
+        delta = _project(x0, delta, cfg.budget, mask, cfg.achromatic, cfg.color_match)
 
         # Borderline early-stop: the moment the gate metric first crosses the threshold, keep
         # THAT checkpoint and stop -- every later step only paints the target deeper (more

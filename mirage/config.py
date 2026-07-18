@@ -98,6 +98,11 @@ class MirageConfig:
                                         # subject clean by perturbing only background/edges.
     achromatic: bool = False           # force delta to be greyscale (equal RGB channels) ->
                                         # no color is painted, imprint reads as grey texture.
+    color_match: bool = False          # alternative to achromatic: tint delta toward the
+                                        # SOURCE image's own dominant channel balance instead
+                                        # of flat grey -> noise blends into the photo's palette
+                                        # rather than reading as an unrelated grey/flesh tone.
+                                        # Ignored if achromatic is also set (achromatic wins).
     perceptual: bool = False           # JND / contrast masking: weight delta by local texture
                                         # so smooth skin stays clean, noise hides in busy areas.
     perceptual_floor: float = 0.25     # min budget multiplier in smooth regions (0..1).

@@ -51,6 +51,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--achromatic", action="store_true",
                    help="force the perturbation to be greyscale (no color painted); the "
                         "imprint reads as grey texture instead of flesh-toned content.")
+    p.add_argument("--color-match", action="store_true",
+                   help="alternative to --achromatic: tint the perturbation toward the "
+                        "SOURCE image's own dominant channel balance instead of flat grey, "
+                        "so the noise blends into the photo's palette instead of reading as "
+                        "an unrelated grey/flesh tone. Ignored if --achromatic is also set.")
     p.add_argument("--perceptual", action="store_true",
                    help="JND/contrast masking: weight delta by local texture so smooth skin "
                         "stays clean and the noise hides in busy regions. Stacks with --mask "
@@ -128,6 +133,8 @@ def build_config(args: argparse.Namespace) -> MirageConfig:
         cfg.mask = args.mask
     if args.achromatic:
         cfg.achromatic = True
+    if args.color_match:
+        cfg.color_match = True
     if args.perceptual:
         cfg.perceptual = True
     if args.perceptual_floor is not None:
